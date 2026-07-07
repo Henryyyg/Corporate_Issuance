@@ -175,25 +175,24 @@ def _extract_maturities(text: str) -> list[int]:
     return sorted(years)
 
 
-# Tranche detection -- applied to the first ~8000 chars (cover page area)
-# where the offering table lives. Beyond that, "Notes due" appears repeatedly
-# in legal descriptions and risk factors which would over-count.
-_NOTES_DUE_RE = re.compile(r"notes?\s+due", re.IGNORECASE)
-_FRN_RE       = re.compile(r"floating\s+rate\s+notes?", re.IGNORECASE)
+# Tranche detection -- anchored on "$" since every tranche line on the cover
+# page starts with a dollar amount (blank or filled). This avoids double-counting
+# from the table of contents which lists each series again without "$" prefixes.
+_TRANCHE_RE = re.compile(
+    r"\$\s*[\d,]*\s*(?:floating\s+rate\s+notes?|(?:[\d\.]+\s*)?%?\s*notes?)\s+due",
+    re.IGNORECASE,
+)
+_FRN_RE = re.compile(r"floating\s+rate\s+notes?", re.IGNORECASE)
 
 
 def _detect_structure(text: str) -> tuple[int, bool]:
     """
-    Returns (tranche_count, has_frn) by scanning the cover page section
-    of the filing (first 8000 chars of stripped text).
-
-    Works for both preliminary (blank amounts) and final prospectuses.
-    For preliminary Amazon-style cover pages the text looks like:
-      "$      FLOATING RATE NOTES DUE  $      % NOTES DUE  $      % NOTES DUE ..."
-    Each "Notes due" = one tranche; "floating rate notes" = FRN tranche.
+    Returns (tranche_count, has_frn) by counting dollar-anchored tranche
+    lines on the cover page. Scanning up to 15,000 chars covers the full
+    cover page without reaching body text.
     """
-    cover = text[:8000]
-    tranche_count = len(_NOTES_DUE_RE.findall(cover))
+    cover = text[:15000]
+    tranche_count = len(_TRANCHE_RE.findall(cover))
     has_frn       = bool(_FRN_RE.search(cover))
     return tranche_count, has_frn
 
