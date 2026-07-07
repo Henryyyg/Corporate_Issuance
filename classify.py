@@ -189,16 +189,24 @@ _FRN_RE = re.compile(r"floating\s+rate\s+notes?", re.IGNORECASE)
 
 def _detect_structure(text: str) -> tuple[int, bool]:
     """
-    Returns (tranche_count, has_frn) by counting dollar-anchored tranche
-    lines on the cover page. Scanning up to 15,000 chars covers the full
-    cover page without reaching body text.
+    Returns (tranche_count, has_frn) by counting the first cluster of
+    dollar-anchored tranche matches. Stops at the first large gap so that
+    a repeated listing later in the document doesn't inflate the count.
     """
-    cover = text[:15000]
-    tranche_count = len(_TRANCHE_RE.findall(cover))
-    has_frn       = bool(_FRN_RE.search(cover))
-    return tranche_count, has_frn
+    matches = list(_TRANCHE_RE.finditer(text))
+    if not matches:
+        return 0, False
 
+    # Walk through matches and stop when there's a gap > 500 chars,
+    # which indicates we've moved past the first listing block.
+    count = 1
+    for i in range(1, len(matches)):
+        if matches[i].start() - matches[i - 1].end() > 500:
+            break
+        count += 1
 
+    has_frn = bool(_FRN_RE.search(text[:matches[count - 1].end() + 50]))
+    return count, has_frn
 def _structure_label(tranche_count: int, has_frn: bool) -> str:
     """Human-readable structure string, e.g. '8-part (incl. FRN)' or '3-part'."""
     if tranche_count == 0:
