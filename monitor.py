@@ -33,10 +33,39 @@ FEED_URL       = "https://www.sec.gov/cgi-bin/browse-edgar"
 DEBT_FORMS = {"S-1", "S-3", "S-3ASR", "424B1", "424B2", "424B3", "424B4", "424B5", "FWP", "8-K"}
 
 _TAG_RE    = re.compile(r"<[^>]+>")
-_ENTITY_RE = re.compile(r"&(?:[a-zA-Z]+|#\d+);")  # handles &nbsp; AND &#160; etc.
+_ENTITY_RE = re.compile(r"&(?:[a-zA-Z]+|#\d+);")
 _WS_RE     = re.compile(r"\s+")
 _CIK_RE    = re.compile(r"/data/(\d+)/")
 _ACC_RE    = re.compile(r"/(\d{10}-\d{2}-\d{6})-index\.htm")
+
+_NDU_RE = re.compile(r"notes?\s+due", re.IGNORECASE)
+_FRN_RE = re.compile(r"floating\s+rate\s+notes?", re.IGNORECASE)
+
+
+def _detect_structure_html(raw: str) -> tuple[int, bool]:
+    """
+    Parses the raw HTML to count tranches from the first table that contains
+    'notes due' rows. BeautifulSoup sees the actual DOM structure, so the
+    cover page table and the prose paragraph are distinct elements -- no
+    character-gap heuristics needed.
+    """
+    try:
+        soup = BeautifulSoup(raw[:150_000], "lxml")
+        for table in soup.find_all("table"):
+            rows = [tr for tr in table.find_all("tr") if _NDU_RE.search(tr.get_text())]
+            if rows:
+                has_frn = any(_FRN_RE.search(tr.get_text()) for tr in rows)
+                return len(rows), has_frn
+    except Exception:
+        pass
+    return 0, False
+
+
+def _fmt_structure(count: int, has_frn: bool) -> str:
+    if count == 0:
+        return ""
+    label = f"{count}-part" if count > 1 else "single tranche"
+    return label + (" (incl. FRN)" if has_frn else "")
 
 
 # ---------------------------------------------------------------------------
@@ -58,8 +87,13 @@ def _get(url: str, params: dict | None = None, retries: int = 3, backoff: float 
             time.sleep(backoff * (attempt + 1))
 
 
-def _fetch_filing_text(cik: int, accession_with_dashes: str, max_bytes: int = 150_000) -> str:
-    """Streams the first 150KB of a filing's submission text and strips HTML tags."""
+def _fetch_filing_text(cik: int, accession_with_dashes: str, max_bytes: int = 150_000) -> tuple[str, int, bool]:
+    """
+    Fetches the first 150KB of a filing's submission text.
+    Returns (stripped_text, tranche_count, has_frn).
+    Structure detection runs on the raw HTML before stripping so the DOM
+    table structure is intact -- much more reliable than regex on stripped text.
+    """
     acc_no_dashes = accession_with_dashes.replace("-", "")
     url = f"{ARCHIVES_URL}/{cik}/{acc_no_dashes}/{accession_with_dashes}.txt"
     try:
@@ -74,18 +108,19 @@ def _fetch_filing_text(cik: int, accession_with_dashes: str, max_bytes: int = 15
                 if total >= max_bytes:
                     break
         raw  = b"".join(chunks).decode("utf-8", errors="ignore")
+        tranche_count, has_frn = _detect_structure_html(raw)
         text = _TAG_RE.sub(" ", raw)
         text = _ENTITY_RE.sub(" ", text)
-        return _WS_RE.sub(" ", text).strip()
+        return _WS_RE.sub(" ", text).strip(), tranche_count, has_frn
     except requests.RequestException:
-        return ""
+        return "", 0, False
 
 
 def _build_result_row(hit: dict, cik_to_row: dict) -> dict | None:
     """Classifies a filing hit and returns a result row, or None if not relevant."""
     from classify import classify, is_debt_filing
-    cik = hit["cik"]
-    text = _fetch_filing_text(cik, hit["accession"])
+    cik  = hit["cik"]
+    text, tranche_count, has_frn = _fetch_filing_text(cik, hit["accession"])
     cls  = classify(hit["form"], hit["items"], text)
     if not is_debt_filing(cls):
         return None
@@ -101,7 +136,7 @@ def _build_result_row(hit: dict, cik_to_row: dict) -> dict | None:
         "debt_size":      cls.debt_amount,
         "equity_size":    cls.equity_amount if cls.is_equity else None,
         "maturities":     ", ".join(str(y) for y in cls.maturity_years),
-        "structure":      cls.structure,
+        "structure":      _fmt_structure(tranche_count, has_frn) or cls.structure,
         "link": (
             f"{ARCHIVES_URL}/{cik}/{acc.replace('-','')}/"
             f"{acc}-index.htm"
