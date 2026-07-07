@@ -23,7 +23,7 @@ from datetime import date
 import requests
 from bs4 import BeautifulSoup
 
-SEC_USER_AGENT = "sec-debt-monitor henry.gilbert@newsquawk.com"
+SEC_USER_AGENT = "sec-debt-monitor henry.gilbert@me.com"
 HEADERS = {"User-Agent": SEC_USER_AGENT, "Accept-Encoding": "gzip, deflate"}
 
 SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik:010d}.json"
@@ -101,6 +101,7 @@ def _build_result_row(hit: dict, cik_to_row: dict) -> dict | None:
         "debt_size":      cls.debt_amount,
         "equity_size":    cls.equity_amount if cls.is_equity else None,
         "maturities":     ", ".join(str(y) for y in cls.maturity_years),
+        "structure":      cls.structure,
         "link": (
             f"{ARCHIVES_URL}/{cik}/{acc.replace('-','')}/"
             f"{acc}-index.htm"
