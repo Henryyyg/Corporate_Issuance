@@ -23,7 +23,7 @@ from datetime import date
 import requests
 from bs4 import BeautifulSoup
 
-SEC_USER_AGENT = "sec-debt-monitor henry.gilbert@me.com"
+SEC_USER_AGENT = "sec-debt-monitor your-email@example.com"
 HEADERS = {"User-Agent": SEC_USER_AGENT, "Accept-Encoding": "gzip, deflate"}
 
 SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik:010d}.json"
@@ -33,7 +33,7 @@ FEED_URL       = "https://www.sec.gov/cgi-bin/browse-edgar"
 DEBT_FORMS = {"S-1", "S-3", "S-3ASR", "424B1", "424B2", "424B3", "424B4", "424B5", "FWP", "8-K"}
 
 _TAG_RE    = re.compile(r"<[^>]+>")
-_ENTITY_RE = re.compile(r"&[a-zA-Z]+;")
+_ENTITY_RE = re.compile(r"&(?:[a-zA-Z]+|#\d+);")  # handles &nbsp; AND &#160; etc.
 _WS_RE     = re.compile(r"\s+")
 _CIK_RE    = re.compile(r"/data/(\d+)/")
 _ACC_RE    = re.compile(r"/(\d{10}-\d{2}-\d{6})-index\.htm")
