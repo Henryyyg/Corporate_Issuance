@@ -61,6 +61,7 @@ class Classification:
     equity_amount: float | None = None
     maturity_years: list[int] = field(default_factory=list)
     currency: str = "USD"
+    structure: str = ""  # e.g. "8-part (incl. FRN)", "3-part", "single tranche"
 
 
 # ---------------------------------------------------------------------------
@@ -174,6 +175,39 @@ def _extract_maturities(text: str) -> list[int]:
     return sorted(years)
 
 
+# Tranche detection -- applied to the first ~8000 chars (cover page area)
+# where the offering table lives. Beyond that, "Notes due" appears repeatedly
+# in legal descriptions and risk factors which would over-count.
+_NOTES_DUE_RE = re.compile(r"notes?\s+due", re.IGNORECASE)
+_FRN_RE       = re.compile(r"floating\s+rate\s+notes?", re.IGNORECASE)
+
+
+def _detect_structure(text: str) -> tuple[int, bool]:
+    """
+    Returns (tranche_count, has_frn) by scanning the cover page section
+    of the filing (first 8000 chars of stripped text).
+
+    Works for both preliminary (blank amounts) and final prospectuses.
+    For preliminary Amazon-style cover pages the text looks like:
+      "$      FLOATING RATE NOTES DUE  $      % NOTES DUE  $      % NOTES DUE ..."
+    Each "Notes due" = one tranche; "floating rate notes" = FRN tranche.
+    """
+    cover = text[:8000]
+    tranche_count = len(_NOTES_DUE_RE.findall(cover))
+    has_frn       = bool(_FRN_RE.search(cover))
+    return tranche_count, has_frn
+
+
+def _structure_label(tranche_count: int, has_frn: bool) -> str:
+    """Human-readable structure string, e.g. '8-part (incl. FRN)' or '3-part'."""
+    if tranche_count == 0:
+        return ""
+    label = f"{tranche_count}-part" if tranche_count > 1 else "single tranche"
+    if has_frn:
+        label += " (incl. FRN)"
+    return label
+
+
 # ---------------------------------------------------------------------------
 # Main classifier
 # ---------------------------------------------------------------------------
@@ -190,10 +224,12 @@ def classify(form: str, items: str, doc_text: str | None) -> Classification:
         any(kw in doc_text.lower() for kw in STRUCTURED_NOTE_KEYWORDS)
         if doc_text else False
     )
-    debt_amount = _extract_debt_amount(doc_text, form) if doc_text else None
+    debt_amount   = _extract_debt_amount(doc_text, form) if doc_text else None
     equity_amount = _extract_equity_amount(doc_text) if doc_text else None
-    maturities = _extract_maturities(doc_text) if doc_text else []
-    currency = _detect_currency(doc_text) if doc_text else "USD"
+    maturities    = _extract_maturities(doc_text) if doc_text else []
+    currency      = _detect_currency(doc_text) if doc_text else "USD"
+    tranche_count, has_frn = _detect_structure(doc_text) if doc_text else (0, False)
+    structure     = _structure_label(tranche_count, has_frn)
 
     # 8-K: use item codes as primary signal
     if form.startswith("8-K"):
@@ -205,23 +241,21 @@ def classify(form: str, items: str, doc_text: str | None) -> Classification:
             equity_amount=equity_amount,
             maturity_years=maturities,
             currency=currency,
+            structure=structure,
         )
 
     # All other forms: keyword scan
     if doc_text:
         lower = doc_text.lower()
-        debt_hits = [kw for kw in DEBT_KEYWORDS if kw in lower]
+        debt_hits  = [kw for kw in DEBT_KEYWORDS  if kw in lower]
         equity_hits = [kw for kw in EQUITY_KEYWORDS if kw in lower]
 
         if form == "FWP":
-            # Term sheets are condensed -- 1 keyword or 2+ maturities is enough
-            is_debt = len(debt_hits) >= 1 or len(maturities) >= 2
+            is_debt   = len(debt_hits) >= 1 or len(maturities) >= 2
             is_equity = len(equity_hits) >= 1
         else:
-            is_debt = len(debt_hits) >= 2
-            is_equity = len(equity_hits) >= 3  # raised to 3 -- generic terms like
-            # "common stock" appear as boilerplate in debt filings, so we need
-            # more specific/repeated equity language to be confident
+            is_debt   = len(debt_hits) >= 2
+            is_equity = len(equity_hits) >= 3
 
         return Classification(
             is_debt=is_debt,
@@ -231,6 +265,7 @@ def classify(form: str, items: str, doc_text: str | None) -> Classification:
             equity_amount=equity_amount,
             maturity_years=maturities,
             currency=currency,
+            structure=structure,
         )
 
     return Classification(False, False)
