@@ -23,7 +23,7 @@ from datetime import date
 import requests
 from bs4 import BeautifulSoup
 
-SEC_USER_AGENT = "sec-debt-monitor your-email@example.com"
+SEC_USER_AGENT = "sec-debt-monitor henry.gilbert@newsquawk.com"
 HEADERS = {"User-Agent": SEC_USER_AGENT, "Accept-Encoding": "gzip, deflate"}
 
 SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik:010d}.json"
