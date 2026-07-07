@@ -201,7 +201,7 @@ def _detect_structure(text: str) -> tuple[int, bool]:
     # which indicates we've moved past the first listing block.
     count = 1
     for i in range(1, len(matches)):
-        if matches[i].start() - matches[i - 1].end() > 500:
+        if matches[i].start() - matches[i - 1].end() > 100:
             break
         count += 1
 
