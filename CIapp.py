@@ -73,6 +73,7 @@ def _render_table(results: list[dict], dl_filename: str, dl_key: str):
             "debt_size":      st.column_config.TextColumn("Debt Size"),
             "equity_size":    st.column_config.TextColumn("Equity Size"),
             "maturities":     st.column_config.TextColumn("Maturities"),
+            "structure":      st.column_config.TextColumn("Structure", help="Number of tranches and whether a floating rate note (FRN) is included"),
             "link":           st.column_config.LinkColumn("Filing", display_text="Open ↗"),
         },
         hide_index=True,
