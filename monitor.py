@@ -47,52 +47,110 @@ _PRELIM_RE = re.compile(r"subject\s+to\s+completion", re.IGNORECASE)
 
 def _parse_cover_table(raw_html: str) -> dict:
     """
-    Finds the first table in the filing HTML that contains 'notes due' rows
-    and extracts structure directly from it -- tranche count, FRN flag,
-    amounts per tranche, and maturity years.
+    Extracts deal structure from the cover page HTML table.
 
-    Reading from the actual HTML table means:
-    - For preliminary: amounts are blank cells so no figures are extracted.
-    - For final: amounts are filled in and extracted accurately per tranche.
-    - No body text pollution (existing notes, risk factors) can interfere.
+    Format C -- FWP vertical definition table (checked first):
+      | Title: | 3.400% Notes due 2029 / Floating Rate Notes due 2028 / ... |
+      | Size:  | 2029 Notes: $1,250,000,000 / FRN: $2,000,000,000 / ...    |
+      Detected by cells whose text is just "Title" or "Size".
+
+    Format B -- column-per-tranche (some FWP term sheets):
+      | FRN | 3.40% Notes | 3.70% Notes | ... |
+
+    Format A -- row-per-tranche (424B5 cover page):
+      | $1,000,000,000 | Floating Rate Senior Notes due 2028 |
     """
     result = {
-        "found":         False,
+        "found":          False,
         "is_preliminary": bool(_PRELIM_RE.search(raw_html)),
-        "tranche_count": 0,
-        "has_frn":       False,
-        "total_amount":  None,
-        "maturities":    [],
+        "tranche_count":  0,
+        "has_frn":        False,
+        "total_amount":   None,
+        "maturities":     [],
     }
+
+    def _amounts_from_text(text: str) -> list[float]:
+        found = []
+        for m in _AMOUNT_RE.finditer(text):
+            try:
+                val = float(m.group(1).replace(",", ""))
+                mult = (m.group(2) or "").lower()
+                if mult == "million":
+                    val *= 1e6
+                elif mult == "billion":
+                    val *= 1e9
+                if val >= 1_000_000:
+                    found.append(val)
+            except ValueError:
+                pass
+        return found
+
+    def _years_from_text(text: str) -> list[int]:
+        return [int(y) for y in _YEAR_RE.findall(text) if 2020 <= int(y) <= 2200]
+
+    _TITLE_CELL = re.compile(r"^\s*title\s*:?\s*$", re.IGNORECASE)
+    _SIZE_CELL  = re.compile(r"^\s*size\s*:?\s*$",  re.IGNORECASE)
 
     try:
         soup = BeautifulSoup(raw_html, "lxml")
+
         for table in soup.find_all("table"):
-            rows = [tr for tr in table.find_all("tr") if _NDU_RE.search(tr.get_text())]
+            all_rows = table.find_all("tr")
+
+            # ── Format C: FWP vertical definition table (Title / Size label rows)
+            # Accumulate from this table -- FWPs often use SEPARATE tables for
+            # FRN and fixed tranches (e.g. Amazon: one table per series group).
+            # We collect from all tables and merge at the end.
+            title_text, size_texts = "", []
+            for row in all_rows:
+                cells = row.find_all(["td", "th"])
+                if len(cells) >= 2:
+                    label = cells[0].get_text(strip=True)
+                    value = cells[1].get_text(separator=" ", strip=True)
+                    if _TITLE_CELL.match(label):
+                        title_text += " " + value
+                    elif _SIZE_CELL.match(label):
+                        size_texts.append(value)
+
+            if title_text.strip() and _NDU_RE.search(title_text):
+                result["found"]          = True
+                result["tranche_count"] += len(_NDU_RE.findall(title_text))
+                result["has_frn"]        = result["has_frn"] or bool(_FRN_RE.search(title_text))
+                result["maturities"]     = sorted(set(result["maturities"] + _years_from_text(title_text)))
+                for st in size_texts:
+                    result.setdefault("_amounts", []).extend(_amounts_from_text(st))
+                continue   # keep scanning remaining tables
+
+            # ── Format B: row where 2+ cells each contain "notes due"
+            for row in all_rows:
+                cells = [c for c in row.find_all(["td", "th"])
+                         if _NDU_RE.search(c.get_text())]
+                if len(cells) >= 2:
+                    has_frn    = any(_FRN_RE.search(c.get_text()) for c in cells)
+                    maturities = []
+                    for c in cells:
+                        maturities.extend(_years_from_text(c.get_text()))
+                    amounts = _amounts_from_text(table.get_text())
+                    result.update({
+                        "found":         True,
+                        "tranche_count": len(cells),
+                        "has_frn":       has_frn,
+                        "total_amount":  sum(amounts) if amounts else None,
+                        "maturities":    sorted(set(maturities)),
+                    })
+                    return result
+
+            # ── Format A: each row with "notes due" = one tranche (424B5)
+            rows = [r for r in all_rows if _NDU_RE.search(r.get_text())]
             if not rows:
                 continue
-
             amounts, years, has_frn = [], [], False
             for row in rows:
                 text = row.get_text(separator=" ", strip=True)
                 if _FRN_RE.search(text):
                     has_frn = True
-                for m in _AMOUNT_RE.finditer(text):
-                    try:
-                        val = float(m.group(1).replace(",", ""))
-                        mult = m.group(2) or ""
-                        if mult.lower() == "million":
-                            val *= 1e6
-                        elif mult.lower() == "billion":
-                            val *= 1e9
-                        if val >= 1_000_000:   # ignore prices/percentages
-                            amounts.append(val)
-                    except ValueError:
-                        pass
-                for y in _YEAR_RE.findall(text):
-                    if 2020 <= int(y) <= 2200:
-                        years.append(int(y))
-
+                amounts.extend(_amounts_from_text(text))
+                years.extend(_years_from_text(text))
             result.update({
                 "found":         True,
                 "tranche_count": len(rows),
@@ -100,10 +158,16 @@ def _parse_cover_table(raw_html: str) -> dict:
                 "total_amount":  sum(amounts) if amounts else None,
                 "maturities":    sorted(set(years)),
             })
-            return result   # stop at the first matching table
+            return result
 
     except Exception:
         pass
+
+    # Total amounts collected across all Format C tables
+    if result.get("_amounts"):
+        result["total_amount"] = sum(result.pop("_amounts"))
+    elif "_amounts" in result:
+        result.pop("_amounts")
 
     return result
 
