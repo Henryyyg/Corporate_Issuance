@@ -58,12 +58,43 @@ def _get(url: str, params: dict | None = None, retries: int = 3, backoff: float 
             time.sleep(backoff * (attempt + 1))
 
 
-def _fetch_filing_text(cik: int, accession_with_dashes: str, max_bytes: int = 150_000) -> str:
-    """Fetches the first 150KB of a filing's submission text and strips HTML tags."""
+def _fetch_filing_text(cik: int, accession_with_dashes: str, max_bytes: int = 80_000) -> str:
+    """
+    Fetches just the cover page of the primary filing document.
+
+    Step 1: fetch the filing index page to find the primary document filename.
+    Step 2: fetch the first N bytes of that document -- the cover page.
+
+    This is far more accurate than fetching the full submission .txt because:
+    - The cover page has exact deal terms (or blanks if preliminary).
+    - Body text (risk factors, existing notes tables, base prospectus) is
+      completely excluded, eliminating false amount/maturity extractions.
+    - "Subject to Completion" appears at the very top of a preliminary so
+      the preliminary flag is always captured.
+
+    Falls back to the old full-submission approach if the index/primary
+    document can't be found.
+    """
     acc_no_dashes = accession_with_dashes.replace("-", "")
-    url = f"{ARCHIVES_URL}/{cik}/{acc_no_dashes}/{accession_with_dashes}.txt"
+    index_url = f"{ARCHIVES_URL}/{cik}/{acc_no_dashes}/{accession_with_dashes}-index.htm"
+
+    # Step 1: find the primary document
+    doc_url = None
     try:
-        with requests.get(url, headers=HEADERS, timeout=20, stream=True) as r:
+        resp = _get(index_url)
+        soup = BeautifulSoup(resp.content, "lxml")
+        for a in soup.select("table.tableFile a"):
+            href = a.get("href", "")
+            if href.lower().endswith((".htm", ".html")) and "index" not in href.lower():
+                doc_url = f"https://www.sec.gov{href}" if href.startswith("/") else href
+                break
+    except Exception:
+        pass
+
+    # Step 2: fetch the primary document (or fall back to full submission)
+    fetch_url = doc_url or f"{ARCHIVES_URL}/{cik}/{acc_no_dashes}/{accession_with_dashes}.txt"
+    try:
+        with requests.get(fetch_url, headers=HEADERS, timeout=20, stream=True) as r:
             r.raise_for_status()
             chunks, total = [], 0
             for chunk in r.iter_content(chunk_size=16384):
