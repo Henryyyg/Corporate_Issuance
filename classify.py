@@ -177,14 +177,15 @@ def _extract_maturities(text: str) -> list[int]:
 
 # Tranche detection -- anchored on "$" since every tranche line on the cover
 # page starts with a dollar amount (blank or filled).
-# Negative lookahead (?!(?:[\s\d,]*)of\s+our) excludes the "Securities Offered"
-# summary section which repeats each tranche as "$ of our X% Notes due Y" --
-# the cover page format never uses "of our", so this cleanly separates the two.
+# Negative lookahead excludes "Securities Offered" section ("$ of our X% Notes due").
+# %[^$]{0,25}notes? allows adjectives between % and notes (e.g. "% Senior Notes due",
+# "% Subordinated Notes due") which our earlier %\s*notes? was missing.
 _TRANCHE_RE = re.compile(
-    r"\$(?!(?:[\s\d,]*)of\s+our)[^$]{0,200}(?:floating\s+rate\s+notes?|%\s*notes?)\s+due",
+    r"\$(?!(?:[\s\d,]*)of\s+our)[^$]{0,200}(?:floating\s+rate\s+[^$]{0,20}notes?|%[^$]{0,25}notes?)\s+due",
     re.IGNORECASE,
 )
-_FRN_RE = re.compile(r"floating\s+rate\s+notes?", re.IGNORECASE)
+# Just "floating rate" is distinctive enough — avoids missing "Floating Rate Senior Notes"
+_FRN_RE = re.compile(r"floating\s+rate", re.IGNORECASE)
 
 
 def _detect_structure(text: str) -> tuple[int, bool]:
@@ -205,7 +206,11 @@ def _detect_structure(text: str) -> tuple[int, bool]:
             break
         count += 1
 
-    has_frn = bool(_FRN_RE.search(text[:matches[count - 1].end() + 50]))
+    # FRN: only flag if "floating rate notes" appears in an actual tranche
+    # match string -- not just anywhere in the document (boilerplate like
+    # "Unlike floating rate notes, these Notes bear a fixed rate" would
+    # otherwise cause false positives on fixed-rate-only offerings).
+    has_frn = any(_FRN_RE.search(m.group()) for m in matches[:count])
     return count, has_frn
 def _structure_label(tranche_count: int, has_frn: bool) -> str:
     """Human-readable structure string, e.g. '8-part (incl. FRN)' or '3-part'."""
