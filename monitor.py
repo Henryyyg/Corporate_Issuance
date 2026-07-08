@@ -38,6 +38,75 @@ _WS_RE     = re.compile(r"\s+")
 _CIK_RE    = re.compile(r"/data/(\d+)/")
 _ACC_RE    = re.compile(r"/(\d{10}-\d{2}-\d{6})-index\.htm")
 
+_NDU_RE    = re.compile(r"notes?\s+due", re.IGNORECASE)
+_FRN_RE    = re.compile(r"floating\s+rate", re.IGNORECASE)
+_AMOUNT_RE = re.compile(r"\$\s*([\d,]+(?:\.\d+)?)\s*(million|billion)?", re.IGNORECASE)
+_YEAR_RE   = re.compile(r"\b(20\d{2})\b")
+_PRELIM_RE = re.compile(r"subject\s+to\s+completion", re.IGNORECASE)
+
+
+def _parse_cover_table(raw_html: str) -> dict:
+    """
+    Finds the first table in the filing HTML that contains 'notes due' rows
+    and extracts structure directly from it -- tranche count, FRN flag,
+    amounts per tranche, and maturity years.
+
+    Reading from the actual HTML table means:
+    - For preliminary: amounts are blank cells so no figures are extracted.
+    - For final: amounts are filled in and extracted accurately per tranche.
+    - No body text pollution (existing notes, risk factors) can interfere.
+    """
+    result = {
+        "found":         False,
+        "is_preliminary": bool(_PRELIM_RE.search(raw_html)),
+        "tranche_count": 0,
+        "has_frn":       False,
+        "total_amount":  None,
+        "maturities":    [],
+    }
+
+    try:
+        soup = BeautifulSoup(raw_html, "lxml")
+        for table in soup.find_all("table"):
+            rows = [tr for tr in table.find_all("tr") if _NDU_RE.search(tr.get_text())]
+            if not rows:
+                continue
+
+            amounts, years, has_frn = [], [], False
+            for row in rows:
+                text = row.get_text(separator=" ", strip=True)
+                if _FRN_RE.search(text):
+                    has_frn = True
+                for m in _AMOUNT_RE.finditer(text):
+                    try:
+                        val = float(m.group(1).replace(",", ""))
+                        mult = m.group(2) or ""
+                        if mult.lower() == "million":
+                            val *= 1e6
+                        elif mult.lower() == "billion":
+                            val *= 1e9
+                        if val >= 1_000_000:   # ignore prices/percentages
+                            amounts.append(val)
+                    except ValueError:
+                        pass
+                for y in _YEAR_RE.findall(text):
+                    if 2020 <= int(y) <= 2200:
+                        years.append(int(y))
+
+            result.update({
+                "found":         True,
+                "tranche_count": len(rows),
+                "has_frn":       has_frn,
+                "total_amount":  sum(amounts) if amounts else None,
+                "maturities":    sorted(set(years)),
+            })
+            return result   # stop at the first matching table
+
+    except Exception:
+        pass
+
+    return result
+
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -58,31 +127,27 @@ def _get(url: str, params: dict | None = None, retries: int = 3, backoff: float 
             time.sleep(backoff * (attempt + 1))
 
 
-def _fetch_filing_text(cik: int, accession_with_dashes: str, max_bytes: int = 80_000) -> str:
+def _fetch_filing(cik: int, accession_with_dashes: str, max_bytes: int = 80_000) -> tuple[str, dict]:
     """
-    Fetches just the cover page of the primary filing document.
+    Fetches the primary filing document and returns:
+      (stripped_text, cover_table_data)
 
-    Step 1: fetch the filing index page to find the primary document filename.
-    Step 2: fetch the first N bytes of that document -- the cover page.
+    stripped_text  -- for debt/equity keyword classification
+    cover_table_data -- extracted directly from the first 'notes due' HTML
+                        table: tranche count, FRN flag, amounts, maturities.
+                        Far more accurate than regex on stripped text because
+                        body text / existing notes cannot pollute the result.
 
-    This is far more accurate than fetching the full submission .txt because:
-    - The cover page has exact deal terms (or blanks if preliminary).
-    - Body text (risk factors, existing notes tables, base prospectus) is
-      completely excluded, eliminating false amount/maturity extractions.
-    - "Subject to Completion" appears at the very top of a preliminary so
-      the preliminary flag is always captured.
-
-    Falls back to the old full-submission approach if the index/primary
-    document can't be found.
+    Step 1: fetch the filing index to find the primary .htm document.
+    Step 2: fetch the first N bytes (the cover page) of that document.
     """
     acc_no_dashes = accession_with_dashes.replace("-", "")
     index_url = f"{ARCHIVES_URL}/{cik}/{acc_no_dashes}/{accession_with_dashes}-index.htm"
 
-    # Step 1: find the primary document
     doc_url = None
     try:
         resp = _get(index_url)
-        soup = BeautifulSoup(resp.content, "lxml")
+        soup  = BeautifulSoup(resp.content, "lxml")
         for a in soup.select("table.tableFile a"):
             href = a.get("href", "")
             if href.lower().endswith((".htm", ".html")) and "index" not in href.lower():
@@ -91,8 +156,9 @@ def _fetch_filing_text(cik: int, accession_with_dashes: str, max_bytes: int = 80
     except Exception:
         pass
 
-    # Step 2: fetch the primary document (or fall back to full submission)
     fetch_url = doc_url or f"{ARCHIVES_URL}/{cik}/{acc_no_dashes}/{accession_with_dashes}.txt"
+    empty = ("", {"found": False, "is_preliminary": False, "tranche_count": 0,
+                  "has_frn": False, "total_amount": None, "maturities": []})
     try:
         with requests.get(fetch_url, headers=HEADERS, timeout=20, stream=True) as r:
             r.raise_for_status()
@@ -104,35 +170,63 @@ def _fetch_filing_text(cik: int, accession_with_dashes: str, max_bytes: int = 80
                 total += len(chunk)
                 if total >= max_bytes:
                     break
-        raw  = b"".join(chunks).decode("utf-8", errors="ignore")
-        text = _TAG_RE.sub(" ", raw)
-        text = _ENTITY_RE.sub(" ", text)
-        return _WS_RE.sub(" ", text).strip()
+        raw   = b"".join(chunks).decode("utf-8", errors="ignore")
+        table = _parse_cover_table(raw)
+        text  = _TAG_RE.sub(" ", raw)
+        text  = _ENTITY_RE.sub(" ", text)
+        return _WS_RE.sub(" ", text).strip(), table
     except requests.RequestException:
+        return empty
+
+
+def _fmt_structure(count: int, has_frn: bool, preliminary: bool = False) -> str:
+    if count == 0:
         return ""
+    label = f"{count}-part" if count > 1 else "single tranche"
+    if has_frn:
+        label += " (incl. FRN)"
+    if preliminary:
+        label += " (Preliminary)"
+    return label
 
 
 def _build_result_row(hit: dict, cik_to_row: dict) -> dict | None:
     """Classifies a filing hit and returns a result row, or None if not relevant."""
     from classify import classify, is_debt_filing
     cik  = hit["cik"]
-    text = _fetch_filing_text(cik, hit["accession"])
+    text, tbl = _fetch_filing(cik, hit["accession"])
     cls  = classify(hit["form"], hit["items"], text)
     if not is_debt_filing(cls):
         return None
     row = cik_to_row.get(cik, None)
     acc = hit["accession"]
+
+    # Use table data when available -- it reads directly from the HTML cover
+    # page table so amounts and maturities come from the right place.
+    # Fall back to classifier results for 8-Ks and other non-prospectus forms
+    # that don't have a cover page table.
+    if tbl["found"]:
+        structure  = _fmt_structure(tbl["tranche_count"], tbl["has_frn"], tbl["is_preliminary"])
+        debt_size  = None if tbl["is_preliminary"] else tbl["total_amount"]
+        maturities = [] if tbl["is_preliminary"] else tbl["maturities"]
+        currency   = cls.currency
+    else:
+        structure  = cls.structure
+        debt_size  = cls.debt_amount
+        maturities = cls.maturity_years
+        currency   = cls.currency
+
     return {
         "filed_at":       hit["filed_at"],
         "ticker":         row.ticker if row else "",
         "company":        row.name   if row else hit.get("company", ""),
         "form":           hit["form"],
         "classification": "Debt + Equity" if cls.is_debt and cls.is_equity else "Debt",
-        "currency":       cls.currency,
-        "debt_size":      cls.debt_amount,
+        "currency":       currency,
+        "debt_size":      debt_size,
         "equity_size":    cls.equity_amount if cls.is_equity else None,
-        "maturities":     ", ".join(str(y) for y in cls.maturity_years),
-        "structure":      cls.structure,
+        "maturities":     ", ".join(str(y) for y in maturities),
+        "structure":      structure,
         "link": (
             f"{ARCHIVES_URL}/{cik}/{acc.replace('-','')}/"
             f"{acc}-index.htm"
