@@ -176,12 +176,12 @@ def _extract_maturities(text: str) -> list[int]:
 
 
 # Tranche detection -- anchored on "$" since every tranche line on the cover
-# page starts with a dollar amount (blank or filled). This avoids double-counting
-# from the table of contents which lists each series again without "$" prefixes.
-# [^$]{0,200} is intentionally permissive: numeric entities like &#160; may
-# appear between the $ and the note description after HTML stripping.
+# page starts with a dollar amount (blank or filled).
+# Negative lookahead (?!(?:[\s\d,]*)of\s+our) excludes the "Securities Offered"
+# summary section which repeats each tranche as "$ of our X% Notes due Y" --
+# the cover page format never uses "of our", so this cleanly separates the two.
 _TRANCHE_RE = re.compile(
-    r"\$[^$]{0,200}(?:floating\s+rate\s+notes?|%\s*notes?)\s+due",
+    r"\$(?!(?:[\s\d,]*)of\s+our)[^$]{0,200}(?:floating\s+rate\s+notes?|%\s*notes?)\s+due",
     re.IGNORECASE,
 )
 _FRN_RE = re.compile(r"floating\s+rate\s+notes?", re.IGNORECASE)
