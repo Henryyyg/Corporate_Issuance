@@ -238,12 +238,21 @@ def classify(form: str, items: str, doc_text: str | None) -> Classification:
         any(kw in doc_text.lower() for kw in STRUCTURED_NOTE_KEYWORDS)
         if doc_text else False
     )
-    debt_amount   = _extract_debt_amount(doc_text, form) if doc_text else None
-    equity_amount = _extract_equity_amount(doc_text) if doc_text else None
-    maturities    = _extract_maturities(doc_text) if doc_text else []
+
+    # Preliminary prospectus supplements carry "subject to completion" by SEC rule.
+    # All amounts and maturities on the cover page are blank -- any figures found
+    # in the text come from the existing notes or base prospectus incorporated by
+    # reference, not the new deal. Zero them out so the table isn't misleading.
+    is_preliminary = bool(doc_text and "subject to completion" in doc_text.lower())
+
+    debt_amount   = None if is_preliminary else (_extract_debt_amount(doc_text, form) if doc_text else None)
+    equity_amount = None if is_preliminary else (_extract_equity_amount(doc_text) if doc_text else None)
+    maturities    = []   if is_preliminary else (_extract_maturities(doc_text) if doc_text else [])
     currency      = _detect_currency(doc_text) if doc_text else "USD"
     tranche_count, has_frn = _detect_structure(doc_text) if doc_text else (0, False)
     structure     = _structure_label(tranche_count, has_frn)
+    if is_preliminary and structure:
+        structure += " (Preliminary)"
 
     # 8-K: use item codes as primary signal
     if form.startswith("8-K"):
