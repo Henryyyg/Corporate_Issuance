@@ -62,7 +62,7 @@ def _render_table(results: list[dict], dl_filename: str, dl_key: str):
 
     st.dataframe(
         display,
-        width="stretch",
+        
         column_config={
             "filed_at":       st.column_config.TextColumn("Filed"),
             "ticker":         st.column_config.TextColumn("Ticker"),
@@ -104,7 +104,7 @@ with st.sidebar:
 
     st.success(f"{len(universe)} companies loaded")
     with st.expander("Show universe"):
-        st.dataframe(universe[["ticker", "name", "index"]], hide_index=True, width="stretch")
+        st.dataframe(universe[["ticker", "name", "index"]], hide_index=True)
 
     st.divider()
     st.subheader("Filters")
