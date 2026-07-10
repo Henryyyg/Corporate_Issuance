@@ -62,7 +62,7 @@ def _render_table(results: list[dict], dl_filename: str, dl_key: str):
 
     st.dataframe(
         display,
-        use_container_width=True,
+        
         column_config={
             "filed_at":       st.column_config.TextColumn("Filed"),
             "ticker":         st.column_config.TextColumn("Ticker"),
@@ -139,7 +139,7 @@ with tab_live:
         interval = st.selectbox("Every", [5, 10, 15, 30], index=1, disabled=not auto)
         st.caption("minutes")
     with col_c:
-        run_live = st.button("🔍 Check now", type="primary", use_container_width=True, key="btn_live")
+        run_live = st.button("🔍 Check now", type="primary", key="btn_live")
 
     if auto and HAS_AUTOREFRESH:
         st_autorefresh(interval=interval * 60 * 1000, key="live_refresh")
@@ -196,7 +196,7 @@ with tab_hist:
         workers = st.number_input("Workers", min_value=5, max_value=30, value=20, step=5)
     with col_f:
         st.write("")
-        run_hist = st.button("🔎 Scan history", type="primary", use_container_width=True, key="btn_hist")
+        run_hist = st.button("🔎 Scan history", type="primary", key="btn_hist")
 
     if "hist_results" not in st.session_state:
         st.session_state["hist_results"] = []
