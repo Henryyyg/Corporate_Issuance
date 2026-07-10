@@ -62,7 +62,7 @@ def _render_table(results: list[dict], dl_filename: str, dl_key: str):
 
     st.dataframe(
         display,
-        use_container_width=True,
+        width="stretch",
         column_config={
             "filed_at":       st.column_config.TextColumn("Filed"),
             "ticker":         st.column_config.TextColumn("Ticker"),
@@ -104,7 +104,7 @@ with st.sidebar:
 
     st.success(f"{len(universe)} companies loaded")
     with st.expander("Show universe"):
-        st.dataframe(universe[["ticker", "name", "index"]], hide_index=True, use_container_width=True)
+        st.dataframe(universe[["ticker", "name", "index"]], hide_index=True, width="stretch")
 
     st.divider()
     st.subheader("Filters")
@@ -139,7 +139,7 @@ with tab_live:
         interval = st.selectbox("Every", [5, 10, 15, 30], index=1, disabled=not auto)
         st.caption("minutes")
     with col_c:
-        run_live = st.button("🔍 Check now", type="primary", use_container_width=True, key="btn_live")
+        run_live = st.button("🔍 Check now", type="primary", width="stretch", key="btn_live")
 
     if auto and HAS_AUTOREFRESH:
         st_autorefresh(interval=interval * 60 * 1000, key="live_refresh")
@@ -196,7 +196,7 @@ with tab_hist:
         workers = st.number_input("Workers", min_value=5, max_value=30, value=20, step=5)
     with col_f:
         st.write("")
-        run_hist = st.button("🔎 Scan history", type="primary", use_container_width=True, key="btn_hist")
+        run_hist = st.button("🔎 Scan history", type="primary", width="stretch", key="btn_hist")
 
     if "hist_results" not in st.session_state:
         st.session_state["hist_results"] = []
