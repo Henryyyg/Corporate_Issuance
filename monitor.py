@@ -250,7 +250,7 @@ def _get(url: str, params: dict | None = None, retries: int = 3, backoff: float 
             time.sleep(backoff * (attempt + 1))
 
 
-def _fetch_filing(cik: int, accession_with_dashes: str, max_bytes: int = 80_000) -> tuple[str, dict]:
+def _fetch_filing(cik: int, accession_with_dashes: str, max_bytes: int = 600_000) -> tuple[str, dict]:
     """
     Fetches the primary filing document and returns:
       (stripped_text, cover_table_data)
@@ -286,11 +286,20 @@ def _fetch_filing(cik: int, accession_with_dashes: str, max_bytes: int = 80_000)
         with requests.get(fetch_url, headers=HEADERS, timeout=20, stream=True) as r:
             r.raise_for_status()
             chunks, total = [], 0
-            for chunk in r.iter_content(chunk_size=16384):
+            for chunk in r.iter_content(chunk_size=32768):
                 if not chunk:
                     continue
                 chunks.append(chunk)
                 total += len(chunk)
+                # Early exit: stop as soon as we have ~10K chars of *visible*
+                # text -- that comfortably covers any cover page. Printer HTML
+                # wraps each visible line in huge styling markup, so raw bytes
+                # are a poor proxy for content; visible-text length is the
+                # right stop condition. Check every ~128KB to keep it cheap.
+                if total % 131072 < 32768:
+                    visible = _WS_RE.sub(" ", _TAG_RE.sub(" ", b"".join(chunks).decode("utf-8", errors="ignore")))
+                    if len(visible) > 10_000:
+                        break
                 if total >= max_bytes:
                     break
         raw   = b"".join(chunks).decode("utf-8", errors="ignore")
