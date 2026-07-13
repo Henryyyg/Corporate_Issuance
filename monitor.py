@@ -45,6 +45,65 @@ _YEAR_RE   = re.compile(r"\b(20\d{2})\b")
 _PRELIM_RE = re.compile(r"subject\s+to\s+completion", re.IGNORECASE)
 
 
+def _parse_cover_summary(text: str) -> dict:
+    """
+    Parses the bolded summary at the very top of a prospectus cover page --
+    e.g. "$300,000,000 Floating Rate Senior Notes due 2029  $1,000,000,000
+    4.750% Senior Notes due 2029 ..." -- which lists every tranche with its
+    amount in one consistent prose format regardless of how the issuer lays
+    out their tables. This is the primary extraction method; tables are the
+    fallback.
+
+    Each tranche = a "$<amount>" followed (within the same segment, before
+    the next "$") by "notes due <year>". Tranches are deduped on
+    (amount, coupon/FRN, year) so the same deal listed twice (cover + summary
+    paragraph) isn't double counted.
+    """
+    head = text[:20000]
+    seen_keys = set()
+    tranches  = []   # list of (amount, is_frn, year)
+
+    for m in re.finditer(r"\$\s*([\d,]{7,})", head):
+        try:
+            amt = float(m.group(1).replace(",", ""))
+        except ValueError:
+            continue
+        if amt < 1_000_000:
+            continue
+        seg = head[m.end(): m.end() + 160]
+        nd  = re.search(r"notes\s+due\s+(?:[A-Za-z]+\.?\s+\d{1,2},?\s+)?(20\d{2})", seg, re.IGNORECASE)
+        if not nd:
+            continue
+        # Don't cross into the next tranche's segment
+        next_dollar = seg.find("$")
+        if next_dollar != -1 and nd.start() > next_dollar:
+            continue
+        before   = seg[:nd.start()]
+        is_frn   = bool(re.search(r"floating\s+rate", before, re.IGNORECASE))
+        coupon_m = re.search(r"([\d.]+)\s*%", before)
+        coupon   = coupon_m.group(1) if coupon_m else ("FRN" if is_frn else "")
+        year     = int(nd.group(1))
+        if not (2020 <= year <= 2200):
+            continue
+        key = (amt, coupon, year)
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        tranches.append((amt, is_frn, year))
+
+    if not tranches:
+        return {"found": False}
+
+    return {
+        "found":          True,
+        "is_preliminary": bool(_PRELIM_RE.search(head)),
+        "tranche_count":  len(tranches),
+        "has_frn":        any(t[1] for t in tranches),
+        "total_amount":   sum(t[0] for t in tranches),
+        "maturities":     sorted({t[2] for t in tranches}),
+    }
+
+
 def _parse_cover_table(raw_html: str) -> dict:
     """
     Extracts deal structure from the cover page HTML table.
@@ -265,11 +324,20 @@ def _build_result_row(hit: dict, cik_to_row: dict) -> dict | None:
     row = cik_to_row.get(cik, None)
     acc = hit["accession"]
 
-    # Use table data when available -- it reads directly from the HTML cover
-    # page table so amounts and maturities come from the right place.
-    # Fall back to classifier results for 8-Ks and other non-prospectus forms
-    # that don't have a cover page table.
-    if tbl["found"]:
+    # Extraction priority:
+    # 1. Cover page summary (the bolded tranche list at the very top -- most
+    #    consistent format across issuers regardless of table layout)
+    # 2. HTML cover table (varies by issuer)
+    # 3. Classifier regex results (8-Ks and other non-prospectus forms)
+    summary = _parse_cover_summary(text)
+
+    if summary.get("found"):
+        prelim     = summary["is_preliminary"]
+        structure  = _fmt_structure(summary["tranche_count"], summary["has_frn"], prelim)
+        debt_size  = None if prelim else summary["total_amount"]
+        maturities = [] if prelim else summary["maturities"]
+        currency   = cls.currency
+    elif tbl["found"]:
         structure  = _fmt_structure(tbl["tranche_count"], tbl["has_frn"], tbl["is_preliminary"])
         debt_size  = None if tbl["is_preliminary"] else tbl["total_amount"]
         maturities = [] if tbl["is_preliminary"] else tbl["maturities"]
