@@ -91,13 +91,24 @@ _CCY_TO_CODE = {
 
 
 def _detect_currency(text: str) -> str:
-    """Identifies the primary currency of a filing from the first currency
-    symbol found near a large number. Defaults to USD."""
-    m = _CCY_CAPTURE_RE.search(text)
-    if not m:
-        return "USD"
-    symbol = m.group(1).replace(" ", "").lower()
-    return _CCY_TO_CODE.get(symbol, "USD")
+    """Identifies the primary currency of a filing by finding the first
+    currency symbol that precedes a number ≥ $1M (i.e. an actual deal
+    amount). This avoids false positives from boilerplate references to
+    small amounts in other currencies (e.g. 'C$5 Canadian withholding tax'
+    in a USD JPMorgan prospectus)."""
+    for m in _CCY_CAPTURE_RE.finditer(text[:30000]):
+        following = text[m.end(): m.end() + 40]
+        digits    = re.match(r"[\s\d,]+", following)
+        if not digits:
+            continue
+        try:
+            val = float(digits.group(0).replace(",", "").strip())
+        except ValueError:
+            continue
+        if val >= 1_000_000:
+            symbol = m.group(1).replace(" ", "").lower()
+            return _CCY_TO_CODE.get(symbol, "USD")
+    return "USD"
 
 _DEBT_AMT_RE = re.compile(
     rf"(?:{_CCY})\s*([\d,]+(?:\.\d+)?)\s*(million|billion)?\s*aggregate principal amount",
@@ -247,7 +258,7 @@ def classify(form: str, items: str, doc_text: str | None) -> Classification:
 
     debt_amount   = None if is_preliminary else (_extract_debt_amount(doc_text, form) if doc_text else None)
     equity_amount = None if is_preliminary else (_extract_equity_amount(doc_text) if doc_text else None)
-    maturities    = []   if is_preliminary else (_extract_maturities(doc_text) if doc_text else [])
+    maturities    = _extract_maturities(doc_text) if doc_text else []  # always extract -- years are stated even in preliminary
     currency      = _detect_currency(doc_text) if doc_text else "USD"
     tranche_count, has_frn = _detect_structure(doc_text) if doc_text else (0, False)
     structure     = _structure_label(tranche_count, has_frn)
