@@ -200,19 +200,24 @@ def _parse_cover_table(raw_html: str) -> dict:
                     return result
 
             # ── Format A: each row with "notes due" = one tranche (424B5)
+            # Some printer HTML puts all tranches in ONE <tr> with <br> between
+            # them. In that case, count "notes due" occurrences within the row.
             rows = [r for r in all_rows if _NDU_RE.search(r.get_text())]
             if not rows:
                 continue
-            amounts, years, has_frn = [], [], False
+            amounts, years, has_frn, tranche_count = [], [], False, 0
             for row in rows:
                 text = row.get_text(separator=" ", strip=True)
                 if _FRN_RE.search(text):
                     has_frn = True
                 amounts.extend(_amounts_from_text(text))
                 years.extend(_years_from_text(text))
+                # Count tranches: if multiple "notes due" in one row, each is a tranche
+                ndu_in_row = len(_NDU_RE.findall(text))
+                tranche_count += max(ndu_in_row, 1)
             result.update({
                 "found":         True,
-                "tranche_count": len(rows),
+                "tranche_count": tranche_count,
                 "has_frn":       has_frn,
                 "total_amount":  sum(amounts) if amounts else None,
                 "maturities":    sorted(set(years)),
@@ -344,12 +349,12 @@ def _build_result_row(hit: dict, cik_to_row: dict) -> dict | None:
         prelim     = summary["is_preliminary"]
         structure  = _fmt_structure(summary["tranche_count"], summary["has_frn"], prelim)
         debt_size  = None if prelim else summary["total_amount"]
-        maturities = [] if prelim else summary["maturities"]
+        maturities = summary["maturities"]   # always show -- years are stated even in preliminary
         currency   = cls.currency
     elif tbl["found"]:
         structure  = _fmt_structure(tbl["tranche_count"], tbl["has_frn"], tbl["is_preliminary"])
         debt_size  = None if tbl["is_preliminary"] else tbl["total_amount"]
-        maturities = [] if tbl["is_preliminary"] else tbl["maturities"]
+        maturities = tbl["maturities"]       # always show
         currency   = cls.currency
     else:
         structure  = cls.structure
