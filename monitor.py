@@ -60,6 +60,47 @@ def _parse_cover_summary(text: str) -> dict:
     paragraph) isn't double counted.
     """
     head = text[:20000]
+
+    # Preliminary prospectus covers often leave both the dollar amount and the
+    # final two maturity digits blank, for example:
+    #   $ Floating Rate Notes due 20
+    #   $ % Notes due 20
+    # In that case the priced-deal parser below cannot work because it requires
+    # a populated amount and a four-digit year. Count the first contiguous
+    # cluster of placeholder tranche lines instead.
+    if _PRELIM_RE.search(head):
+        placeholder_re = re.compile(
+            r"\$(?!(?:[\s\d,]*)of\s+our)"
+            r"[^$]{0,140}?"
+            r"(?:floating\s+rate|(?:[\d.]*\s*)?%)"
+            r"[^$]{0,60}?notes?\s+due\s+20(?:\d{2})?",
+            re.IGNORECASE,
+        )
+        matches = list(placeholder_re.finditer(head))
+        if matches:
+            cluster = [matches[0]]
+            for match in matches[1:]:
+                # Cover-page tranche lines sit close together. A larger gap
+                # indicates a repeated description later in the prospectus.
+                if match.start() - cluster[-1].end() > 250:
+                    break
+                cluster.append(match)
+
+            years = []
+            for match in cluster:
+                year_match = re.search(r"notes?\s+due\s+(20\d{2})", match.group(), re.IGNORECASE)
+                if year_match:
+                    years.append(int(year_match.group(1)))
+
+            return {
+                "found":          True,
+                "is_preliminary": True,
+                "tranche_count":  len(cluster),
+                "has_frn":        any(_FRN_RE.search(m.group()) for m in cluster),
+                "total_amount":   None,
+                "maturities":     sorted(set(years)),
+            }
+
     seen_keys = set()
     tranches  = []   # list of (amount, is_frn, year)
 
