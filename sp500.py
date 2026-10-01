@@ -17,6 +17,10 @@ def get_universe(data_dir='data', force=False, enrich=False, now=None):
     shared_path = Path(__file__).with_name('universe_snapshot.json')
     cache_path = path if path.exists() else shared_path
     cached = json.loads(cache_path.read_text()) if cache_path.exists() else None
+    if cached and cached.get('companies') and any(not r.get('sector') for r in cached['companies']) and shared_path.exists():
+        shared = json.loads(shared_path.read_text())
+        if shared['month'] >= cached['month'] and all(r.get('sector') for r in shared['companies']):
+            cached = shared
     month = now.strftime('%Y-%m')
     if cached and cached['month'] == month and not force:
         return cached, None
@@ -25,7 +29,7 @@ def get_universe(data_dir='data', force=False, enrich=False, now=None):
                                 headers={'User-Agent': 'Mozilla/5.0 CorporateIssuanceMonitor'}, timeout=30)
         response.raise_for_status()
         tables = pd.read_html(io.StringIO(response.text))
-        table = next(t for t in tables if {'Symbol', 'Security', 'CIK'} <= set(t.columns))
+        table = next(t for t in tables if {'Symbol', 'Security', 'CIK', 'GICS Sector'} <= set(t.columns))
         if not 490 <= len(table) <= 520:
             raise ValueError(f'Unexpected constituent count: {len(table)}')
         # Wikipedia includes CIKs; SEC mapping verifies issuer IDs.
@@ -46,7 +50,7 @@ def get_universe(data_dir='data', force=False, enrich=False, now=None):
                     name = yf.Ticker(ticker).get_info().get('longName') or name
                 except Exception:
                     pass  # Names from the constituent source remain usable.
-            rows.append({'ticker': ticker, 'company': name, 'cik': cik})
+            rows.append({'ticker': ticker, 'company': name, 'cik': cik, 'sector': str(r['GICS Sector']).strip()})
         snapshot = {'month': month, 'updated_at': now.isoformat(),
                     'source': response.url, 'companies': rows}
         path.parent.mkdir(parents=True, exist_ok=True)
