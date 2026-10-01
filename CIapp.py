@@ -26,6 +26,8 @@ with st.sidebar:
                          help='Only during refresh. Index membership comes from the constituent list.')
     auto = st.checkbox('Auto-scan while this app is open')
     interval = st.selectbox('Scan every (minutes)', [5, 10, 15, 30], index=1)
+    scan_mode = st.radio('Scan mode', ['Latest filings (fast)', 'Full catch-up'])
+    st.caption('Latest checks five SEC feeds and reads only unseen matches. Full catch-up checks every issuer for the selected date range.')
     since = st.date_input('Scan filings since', value=now.date() - timedelta(days=7), max_value=now.date())
     stages = st.multiselect('Stages', ['ANNOUNCED', 'LAUNCHED', 'PRICED'], default=['ANNOUNCED', 'LAUNCHED', 'PRICED'])
     min_amount = st.number_input('Minimum known USD size (mln)', min_value=0, value=0, step=50)
@@ -46,9 +48,13 @@ run = st.button('Scan EDGAR now', type='primary')
 if run or (auto and st.session_state.get('last_tick') != refresh_count):
     st.session_state['last_tick'] = refresh_count
     bar = st.progress(0, text='Checking SEC submissions…')
+    status = st.empty()
     report = scan(universe['companies'], store, since,
-                  progress=lambda done, total: bar.progress(done / total, text=f'Checked {done}/{total} issuers'))
+                  progress=lambda done, total: bar.progress(done / total, text=f'Checked {done}/{total} issuers'),
+                  activity=lambda message: status.caption(message),
+                  mode='live' if scan_mode == 'Latest filings (fast)' else 'full')
     bar.empty()
+    status.empty()
     st.session_state['report'] = report
     st.session_state['last_scan'] = now.isoformat()
 
@@ -59,6 +65,9 @@ if 'report' in st.session_state:
         st.warning(f'{len(report["errors"])} scan failures. This scan is incomplete; failed filings remain eligible for retry.')
         with st.expander('Scan errors'):
             st.text('\n'.join(report['errors']))
+    if report.get('warnings'):
+        with st.expander('Latest-feed coverage limits'):
+            st.write('\n'.join(report['warnings']))
 
 all_events = store.events()
 events = [e for e in all_events if e['stage'] in stages

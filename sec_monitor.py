@@ -1,5 +1,10 @@
 """EDGAR-first scanner: submissions discovery, complete documents and 8-K exhibits."""
-from datetime import date
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED, as_completed
+from queue import Queue, Empty
+import time
+import re
 from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup
@@ -8,6 +13,51 @@ from sec_client import SecClient
 
 FORMS = {'8-K', '8-K/A', '424B2', '424B3', '424B5', 'FWP'}
 ARCHIVES = 'https://www.sec.gov/Archives/edgar/data'
+
+
+def latest_candidates(client, issuers, since):
+    """A bounded current-filings feed check, not a historical completeness scan."""
+    def fetch_form(form):
+        hits, errors, warnings = {}, [], []
+        try:
+            response = client.get('https://www.sec.gov/cgi-bin/browse-edgar', params={
+                'action': 'getcurrent', 'type': form, 'owner': 'include',
+                'count': 100, 'output': 'atom'})
+            soup = BeautifulSoup(response.text, 'xml')
+            if soup.find('feed') is None:
+                raise ValueError('SEC did not return an Atom feed')
+            entries = soup.find_all('entry')
+            if len(entries) >= 100:
+                warnings.append(f'{form}: latest 100 filings only; use Full catch-up for earlier filings')
+            for entry in entries:
+                link = entry.find('link', href=True)
+                url = link['href'] if link else ''
+                cik = re.search(r'/data/(\d+)/', url)
+                accession = re.search(r'(\d{10}-\d{2}-\d{6})-index', url)
+                if not cik or not accession or int(cik[1]) not in issuers:
+                    continue
+                detected = entry.find('title').get_text().split(' - ')[0].strip()
+                if detected not in FORMS:
+                    continue
+                updated = entry.find('updated')
+                filed = updated.get_text()[:10] if updated else date.today().isoformat()
+                if filed < since.isoformat():
+                    continue
+                hits[accession[1]] = {'cik': int(cik[1]), 'accession': accession[1],
+                    'form': detected, 'filed_date': filed, 'accepted_at': '', 'primary': ''}
+        except Exception as exc:
+            errors.append(f'{form}: latest-filings feed failed: {exc}')
+        return hits, errors, warnings
+    hits, errors, warnings = {}, [], []
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = [executor.submit(fetch_form, form)
+                   for form in ('8-K', '424B2', '424B3', '424B5', 'FWP')]
+        for future in as_completed(futures):
+            found, failed, limits = future.result()
+            hits.update(found)
+            errors.extend(failed)
+            warnings.extend(limits)
+    return list(hits.values()), errors, warnings
 
 
 def candidates(client, cik, since):
@@ -35,8 +85,24 @@ def candidates(client, cik, since):
 
 def documents(client, hit):
     base = f'{ARCHIVES}/{hit["cik"]}/{hit["accession"].replace("-", "")}/'
+    # Supplements have no 8-K release exhibits to discover. Use the exact
+    # primary document from submissions rather than fetching its index first.
+    if not hit['form'].startswith('8-K') and hit['primary']:
+        url = base + hit['primary']
+        return [(url, client.get(url).text)]
     index = base + hit['accession'] + '-index.htm'
     soup = BeautifulSoup(client.get(index).text, 'html.parser')
+    if not hit['accepted_at']:
+        for label in soup.select('.infoHead'):
+            if label.get_text(strip=True) == 'Accepted':
+                value = label.find_next_sibling(class_='info')
+                if value:
+                    try:
+                        accepted = datetime.fromisoformat(value.get_text(strip=True))
+                        hit['accepted_at'] = accepted.replace(tzinfo=ZoneInfo('America/New_York')).isoformat()
+                    except ValueError:
+                        pass
+                break
     links = []
     for row in soup.select('table.tableFile tr'):
         cells = row.find_all('td')
@@ -65,21 +131,43 @@ def documents(client, hit):
     return [(url, client.get(url).text) for url in links]
 
 
-def scan(universe, store, since, progress=None, client=None):
+def scan(universe, store, since, progress=None, client=None, activity=None,
+         issuer_budget=45, max_workers=6, mode='full'):
     client = client or SecClient()
     errors, new, checked = [], 0, 0
     issuers = {}
     for company in universe:
         issuers.setdefault(int(company['cik']), company)  # e.g. GOOG/GOOGL share a CIK
-    for i, (cik, company) in enumerate(issuers.items(), 1):
-        try:
-            hits = candidates(client, cik, since)
-        except Exception as exc:
-            errors.append(f'{company["ticker"]}: submissions failed: {exc}')
-            if progress:
-                progress(i, len(issuers))
-            continue
+    warnings = []
+    live_hits = None
+    if mode == 'live':
+        if activity:
+            activity('Checking five EDGAR latest-filings feeds…')
+        hits, feed_errors, warnings = latest_candidates(client, issuers, since)
+        errors.extend(feed_errors)
+        live_hits = {}
         for hit in hits:
+            if not store.seen(hit['accession']):
+                live_hits.setdefault(hit['cik'], []).append(hit)
+        issuers = {cik: company for cik, company in issuers.items() if cik in live_hits}
+    messages = Queue()
+
+    def process(cik, company):
+        started = time.monotonic()
+        local_errors, local_new, local_checked = [], 0, 0
+        messages.put(f'{company["ticker"]}: checking submissions')
+        try:
+            hits = candidates(client, cik, since) if live_hits is None else live_hits[cik]
+        except Exception as exc:
+            return 0, 0, [f'{company["ticker"]}: submissions failed: {exc}']
+        pending = [h for h in hits if not store.seen(h['accession'])]
+        for number, hit in enumerate(pending, 1):
+            if time.monotonic() - started >= issuer_budget:
+                local_errors.append(f'{company["ticker"]}: time budget reached; '
+                                    f'{len(pending) - number + 1} filings remain for the next scan')
+                break
+            messages.put(f'{company["ticker"]}: reading {hit["form"]} '
+                         f'{number}/{len(pending)} · {hit["accession"]}')
             if store.seen(hit['accession']):
                 continue
             try:
@@ -98,10 +186,37 @@ def scan(universe, store, since, progress=None, client=None):
                     key = (event['currency'], event['amount'], str(event['tranches']))
                     if key not in unique or STAGES[event['stage']] > STAGES[unique[key]['stage']]:
                         unique[key] = event
-                new += store.save(hit['accession'], list(unique.values()))
-                checked += 1
+                local_new += store.save(hit['accession'], list(unique.values()))
+                local_checked += 1
             except Exception as exc:
-                errors.append(f'{company["ticker"]} {hit["accession"]}: {exc}')
-        if progress:
-            progress(i, len(issuers))
-    return {'new': new, 'checked': checked, 'errors': errors}
+                local_errors.append(f'{company["ticker"]} {hit["accession"]}: {exc}')
+        return local_new, local_checked, local_errors
+
+    # Only the main Streamlit thread updates widgets. Workers send activity
+    # through a queue; slow banks cannot block every other issuer's progress.
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        pending = {executor.submit(process, cik, company): company
+                   for cik, company in issuers.items()}
+        done_count = 0
+        while pending:
+            completed, _ = wait(pending, timeout=0.25, return_when=FIRST_COMPLETED)
+            while True:
+                try:
+                    message = messages.get_nowait()
+                except Empty:
+                    break
+                if activity:
+                    activity(message)
+            for future in completed:
+                company = pending.pop(future)
+                try:
+                    found, processed, failures = future.result()
+                    new += found
+                    checked += processed
+                    errors.extend(failures)
+                except Exception as exc:
+                    errors.append(f'{company["ticker"]}: scan failed: {exc}')
+                done_count += 1
+                if progress:
+                    progress(done_count, len(issuers))
+    return {'new': new, 'checked': checked, 'errors': errors, 'warnings': warnings}

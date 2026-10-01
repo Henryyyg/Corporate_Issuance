@@ -23,15 +23,27 @@ company names come from Wikipedia's constituent table, verified against SEC CIKs
 optional yfinance enrichment updates names only. It cannot determine index membership.
 A failed refresh retains the last good snapshot with a visible warning.
 
-Click **Scan EDGAR now**. Default lookback is seven days. The scanner checks each
-unique issuer's SEC submissions, including older archive blocks where needed,
-then reads primary documents and linked 8-K EX-99 and EX-1.1 exhibits. Full documents
-are read; failed requests/unsupported exhibit formats are surfaced and retried.
+Click **Scan EDGAR now**. The default **Latest filings (fast)** mode checks five
+SEC Atom feeds, each limited to the latest 100 entries, then reads only unseen
+S&P 500 matches. This is a bounded latest-feed check, not complete historical
+coverage. Feed errors and window limits are visible.
+
+Choose **Full catch-up** to scan each unique issuer's SEC submissions for the
+selected date range (default seven days), including older archive blocks.
+Both modes read primary documents and linked 8-K EX-99 and EX-1.1 exhibits. Documents are read completely up to a 12 MB safety limit; oversize documents
+remain unprocessed with an error. Requests have short connect/read timeouts,
+a 20-second body-download deadline and one retry. Failed reads remain retryable.
+Six issuer workers share one rate limiter. A 45-second per-issuer budget stops
+a bank's large filing backlog from holding up the scan; unfinished filings are
+reported and can be continued on the next scan. Progress and activity update
+while other issuers work. The budget is checked between filings, so a filing
+with several documents can exceed it before the next check.
 It uses at most four SEC request starts/second per process. Avoid multiple scanners
 sharing an IP if their combined traffic would exceed SEC limits.
 
 Auto-scan operates only while an app session is active. The monthly universe workflow
-does not run issuance scans unattended. Scans may take several minutes for the whole universe.
+does not run issuance scans unattended. Full catch-up can still take several minutes. Fast-mode duration depends on
+unseen matching filings and SEC availability; it does not query 500 submissions.
 
 ## Output and persistence
 
@@ -69,6 +81,10 @@ on the feed. The legacy `monitor.py`, `classify.py`, `universe.py` remain unused
 ```bash
 python -m unittest discover -s tests -v
 ```
+
+Tests also verify fast mode skips issuer submissions and seen filings, slow
+issuers do not block others, deferred filings remain retryable, bounded request
+retries, feed universe filtering and direct supplement fetches.
 
 Tests cover lifecycle labels, false positives, multi-tranche parsing, currency,
 timezones, persistence/deduplication, distinct deals, failed-filings retries and
