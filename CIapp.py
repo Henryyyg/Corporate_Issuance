@@ -1,237 +1,95 @@
-"""
-CIapp -- Corporate Issuance Monitor
-
-Two modes:
-  Live Monitor  -- polls EDGAR's new-filings feed, filters to universe.
-                   Runs in seconds. Set auto-refresh for hands-free monitoring.
-  Historical Scan -- queries each company's full submission history for a
-                     date range. Thorough but takes 2-3 minutes.
-
-Run with:
-    streamlit run CIapp.py
-"""
-
-from __future__ import annotations
-
-from datetime import date, timedelta
+"""Run: streamlit run CIapp.py"""
+import os
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import streamlit as st
+from streamlit_autorefresh import st_autorefresh
 
-from universe import get_universe
-from monitor import check_realtime, check_filings
+from headline_generator import headline, filing_times
+from sec_monitor import scan
+from sp500 import get_universe
+from storage import Store
 
-try:
-    from streamlit_autorefresh import st_autorefresh
-    HAS_AUTOREFRESH = True
-except ImportError:
-    HAS_AUTOREFRESH = False
-
-st.set_page_config(page_title="CIapp", layout="wide", page_icon="📋")
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _fmt_amount(v, currency: str = "USD") -> str:
-    if pd.isna(v) or v is None:
-        return ""
-    symbol = {
-        "USD": "$",   "CAD": "C$",  "EUR": "€",   "GBP": "£",
-        "JPY": "¥",   "AUD": "A$",  "NZD": "NZ$", "CHF": "CHF ",
-        "HKD": "HK$", "SGD": "S$",
-    }.get(currency, "$")
-    if v >= 1e9:
-        return f"{symbol}{v / 1e9:,.2f}bln"
-    return f"{symbol}{v / 1e6:,.2f}mln"
-
-
-def _render_table(results: list[dict], dl_filename: str, dl_key: str):
-    if not results:
-        return
-    df = pd.DataFrame(results).sort_values("filed_at", ascending=False).reset_index(drop=True)
-    m1, m2, m3 = st.columns(3)
-    m1.metric("Filings", len(df))
-    m2.metric("Debt only", int((df["classification"] == "Debt").sum()))
-    m3.metric("Debt + Equity", int((df["classification"] == "Debt + Equity").sum()))
-
-    display = df.copy()
-    display["debt_size"]   = display.apply(lambda r: _fmt_amount(r["debt_size"],   r.get("currency", "USD")), axis=1)
-    display["equity_size"] = display.apply(lambda r: _fmt_amount(r["equity_size"], r.get("currency", "USD")), axis=1)
-
-    st.dataframe(
-        display,
-        
-        column_config={
-            "filed_at":       st.column_config.TextColumn("Filed"),
-            "ticker":         st.column_config.TextColumn("Ticker"),
-            "company":        st.column_config.TextColumn("Company"),
-            "form":           st.column_config.TextColumn("Form"),
-            "classification": st.column_config.TextColumn("Type"),
-            "currency":       st.column_config.TextColumn("Currency"),
-            "debt_size":      st.column_config.TextColumn("Debt Size"),
-            "equity_size":    st.column_config.TextColumn("Equity Size"),
-            "maturities":     st.column_config.TextColumn("Maturities"),
-            "structure":      st.column_config.TextColumn("Structure", help="Number of tranches and whether a floating rate note (FRN) is included"),
-            "link":           st.column_config.LinkColumn("Filing", display_text="Open ↗"),
-        },
-        hide_index=True,
-    )
-    col_dl, col_clr = st.columns([1, 5])
-    with col_dl:
-        st.download_button("⬇ CSV", display.to_csv(index=False).encode(), dl_filename, "text/csv", key=dl_key)
-
-
-# ---------------------------------------------------------------------------
-# Sidebar -- universe + shared filters
-# ---------------------------------------------------------------------------
+st.set_page_config(page_title='Corporate Issuance', page_icon='📋', layout='wide')
+st.title('Corporate Issuance')
+st.caption('S&P 500 · SEC EDGAR · Announcement → Launch → Pricing')
+data_dir = os.getenv('ISSUANCE_DATA_DIR', 'data')
+store = Store(os.path.join(data_dir, 'issuance.sqlite3'))
+now = datetime.now(ZoneInfo('Europe/London'))
 
 with st.sidebar:
-    st.title("📋 CIapp")
-    st.caption("S&P 500 + Nasdaq 100 | SEC EDGAR")
-    st.divider()
+    st.subheader('Monitor')
+    force = st.button('Refresh S&P 500 universe')
+    enrich = st.checkbox('Enrich company names with yfinance', value=False,
+                         help='Only during refresh. Index membership comes from the constituent list.')
+    auto = st.checkbox('Auto-scan while this app is open')
+    interval = st.selectbox('Scan every (minutes)', [5, 10, 15, 30], index=1)
+    since = st.date_input('Scan filings since', value=now.date() - timedelta(days=7), max_value=now.date())
+    stages = st.multiselect('Stages', ['ANNOUNCED', 'LAUNCHED', 'PRICED'], default=['ANNOUNCED', 'LAUNCHED', 'PRICED'])
+    min_amount = st.number_input('Minimum known USD size (mln)', min_value=0, value=0, step=50)
+    include_unknown = st.checkbox('Include deals with undisclosed size', value=True)
+    query = st.text_input('Company or ticker')
+    st.caption('Universe refreshes on the first scan/open of each month. Auto-scan needs an active app session.')
 
-    st.subheader("Universe")
-    if st.button("🔄 Refresh universe"):
-        universe = get_universe(force_refresh=True)
-    else:
-        universe = get_universe()
+try:
+    universe, warning = get_universe(data_dir, force=force, enrich=enrich)
+except Exception as exc:
+    st.error(str(exc))
+    st.stop()
+if warning:
+    st.warning(warning)
+st.caption(f'{len(universe["companies"])} securities · Universe updated {universe["updated_at"][:10]}')
+refresh_count = st_autorefresh(interval=interval * 60000, key='scan_tick') if auto else None
+run = st.button('Scan EDGAR now', type='primary')
+if run or (auto and st.session_state.get('last_tick') != refresh_count):
+    st.session_state['last_tick'] = refresh_count
+    bar = st.progress(0, text='Checking SEC submissions…')
+    report = scan(universe['companies'], store, since,
+                  progress=lambda done, total: bar.progress(done / total, text=f'Checked {done}/{total} issuers'))
+    bar.empty()
+    st.session_state['report'] = report
+    st.session_state['last_scan'] = now.isoformat()
 
-    if universe.empty:
-        st.error("Failed to load universe. Check your internet connection.")
-        st.stop()
+if 'report' in st.session_state:
+    report = st.session_state['report']
+    st.info(f'Last scan: {st.session_state["last_scan"]} · {report["new"]} new updates · {report["checked"]} newly processed filings')
+    if report['errors']:
+        st.warning(f'{len(report["errors"])} scan failures. This scan is incomplete; failed filings remain eligible for retry.')
+        with st.expander('Scan errors'):
+            st.text('\n'.join(report['errors']))
 
-    st.success(f"{len(universe)} companies loaded")
-    with st.expander("Show universe"):
-        st.dataframe(universe[["ticker", "name", "index"]], hide_index=True)
-
-    st.divider()
-    st.subheader("Filters")
-    st.caption("Applied to both modes.")
-    exclude_structured = st.checkbox("Exclude structured/retail notes", value=True)
-    min_size_m = st.number_input("Min deal size ($M)", min_value=0, value=100, step=50)
-    min_amount = (min_size_m * 1e6) if min_size_m > 0 else None
-
-
-# ---------------------------------------------------------------------------
-# Main -- two tabs
-# ---------------------------------------------------------------------------
-
-st.title("CIapp — Corporate Issuance Monitor")
-
-tab_live, tab_hist = st.tabs(["🔴 Live Monitor", "📅 Historical Scan"])
-
-
-# ── Tab 1: Live monitor ────────────────────────────────────────────────────
-
-with tab_live:
-    st.caption(
-        "Polls EDGAR's new-filings feed for each form type and filters to your "
-        "universe. Only fetches text for actual matches — typically **5–20 seconds** "
-        "regardless of universe size. Enable auto-refresh for continuous monitoring."
-    )
-
-    col_a, col_b, col_c = st.columns([1, 1, 2])
-    with col_a:
-        auto = st.checkbox("Auto-refresh")
-    with col_b:
-        interval = st.selectbox("Every", [5, 10, 15, 30], index=1, disabled=not auto)
-        st.caption("minutes")
-    with col_c:
-        run_live = st.button("🔍 Check now", type="primary", key="btn_live")
-
-    if auto and HAS_AUTOREFRESH:
-        st_autorefresh(interval=interval * 60 * 1000, key="live_refresh")
-    elif auto:
-        st.warning("Install `streamlit-autorefresh` for auto-refresh.")
-
-    if "live_results" not in st.session_state:
-        st.session_state["live_results"] = []
-    if "live_seen" not in st.session_state:
-        st.session_state["live_seen"] = set()
-
-    should_run = run_live or (auto and HAS_AUTOREFRESH)
-
-    if should_run:
-        with st.spinner("Polling EDGAR new-filings feed..."):
-            new_hits, updated_seen = check_realtime(
-                universe,
-                seen_accessions=st.session_state["live_seen"].copy(),
-                exclude_structured=exclude_structured,
-                min_debt_amount=min_amount,
-            )
-        st.session_state["live_seen"] = updated_seen
-        if new_hits:
-            st.session_state["live_results"] = new_hits + st.session_state["live_results"]
-            st.toast(f"{len(new_hits)} new filing(s) found", icon="📄")
-        else:
-            st.toast("No new filings since last check", icon="✅")
-
-    st.divider()
-
-    if st.session_state["live_results"]:
-        _render_table(st.session_state["live_results"], "live_filings.csv", "dl_live")
-        if st.button("🗑 Clear live results"):
-            st.session_state["live_results"] = []
-            st.session_state["live_seen"]    = set()
-            st.rerun()
-    else:
-        st.info("No results yet — click **Check now** or enable auto-refresh.")
-
-
-# ── Tab 2: Historical scan ─────────────────────────────────────────────────
-
-with tab_hist:
-    st.caption(
-        "Queries each company's full submission history for a specific date range. "
-        "Complete and reliable, but slow (~2-3 minutes for the full universe). "
-        "Use this to catch up on a past period or verify the live monitor."
-    )
-
-    col_d, col_e, col_f = st.columns([1, 1, 2])
-    with col_d:
-        since_date = st.date_input("Since", value=date.today() - timedelta(days=1), max_value=date.today())
-    with col_e:
-        workers = st.number_input("Workers", min_value=5, max_value=30, value=20, step=5)
-    with col_f:
-        st.write("")
-        run_hist = st.button("🔎 Scan history", type="primary", key="btn_hist")
-
-    if "hist_results" not in st.session_state:
-        st.session_state["hist_results"] = []
-
-    if run_hist:
-        bar = st.progress(0.0, text="Starting historical scan...")
-        def _progress(done, total):
-            bar.progress(done / total, text=f"Scanned {done}/{total} companies...")
-        with st.spinner(""):
-            hist_hits = check_filings(
-                universe, since_date,
-                exclude_structured=exclude_structured,
-                min_debt_amount=min_amount,
-                max_workers=int(workers),
-                progress_callback=_progress,
-            )
-        bar.empty()
-        if hist_hits:
-            existing = {r["link"] for r in st.session_state["hist_results"]}
-            fresh    = [r for r in hist_hits if r["link"] not in existing]
-            st.session_state["hist_results"] = fresh + st.session_state["hist_results"]
-            st.toast(f"Found {len(hist_hits)} filing(s)", icon="📄")
-        else:
-            st.toast("No matching filings in this date range", icon="✅")
-
-    st.divider()
-
-    if st.session_state["hist_results"]:
-        _render_table(st.session_state["hist_results"], "hist_filings.csv", "dl_hist")
-        if st.button("🗑 Clear history results"):
-            st.session_state["hist_results"] = []
-            st.rerun()
-    else:
-        st.info("No results yet — set a date range and click **Scan history**.")
-
-
-if __name__ == "__main__":
-    pass
+all_events = store.events()
+events = [e for e in all_events if e['stage'] in stages
+          and (not query or query.lower() in (e['company'] + ' ' + e['ticker']).lower())
+          and (include_unknown or e['amount'] is not None)
+          and (e['amount'] is None or e['currency'] != 'USD' or e['amount'] >= min_amount * 1e6)]
+events.sort(key=lambda e: (e['filed_date'], e['accepted_at'], e['observed_at']), reverse=True)
+if not events:
+    st.info('No matching issuance updates. Run a scan or adjust the filters.')
+else:
+    rows = [{'headline': headline(e), 'stage': e['stage'], 'filed_date': e['filed_date'],
+             'accepted_at': e['accepted_at'], 'observed_at': e['observed_at'], 'source': e['source_url']}
+            for e in events]
+    st.download_button('Download headlines CSV', pd.DataFrame(rows).to_csv(index=False), 'issuance.csv', 'text/csv')
+    for event in events:
+        with st.container(border=True):
+            st.code(headline(event), language=None)  # Native copy button
+            st.caption('SEC acceptance: ' + filing_times(event['accepted_at']))
+            st.link_button('Open SEC source', event['source_url'])
+            with st.expander('Evidence and deal timeline'):
+                st.write(event['evidence'])
+                if event['use_of_proceeds']:
+                    st.write(event['use_of_proceeds'])
+                if event.get('bookrunners'):
+                    st.write('Bookrunners: ' + event['bookrunners'])
+                if event['tranches']:
+                    st.dataframe(pd.DataFrame(event['tranches']), hide_index=True)
+                if event['stage'] == 'PRICED' and not event['terms_complete']:
+                    st.caption('Pricing announcement found; full tranche terms were not extracted. Check the source.')
+                timeline = [e for e in all_events if e['deal_id'] == event['deal_id']]
+                for e in sorted(timeline, key=lambda x: (x['filed_date'], x['accepted_at'])):
+                    st.write(f'{e["stage"]} · {filing_times(e["accepted_at"])}')
+                st.caption('Times show SEC acceptance, not the exact market announcement/launch time. '
+                           'Deals link automatically only when the securities and size match unambiguously.')
