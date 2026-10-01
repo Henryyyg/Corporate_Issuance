@@ -89,3 +89,16 @@ retries, feed universe filtering and direct supplement fetches.
 Tests cover lifecycle labels, false positives, multi-tranche parsing, currency,
 timezones, persistence/deduplication, distinct deals, failed-filings retries and
 monthly refresh failures. Live network validation is separate from these fixtures.
+
+## Financials tab
+
+Non-financials opens first. Financials has its own minimum known USD deal size,
+defaulting to USD 1bln, and includes undisclosed-size announcements by default.
+Both controls can be changed independently of Non-financials. Known non-USD amounts
+remain visible without an FX conversion. Stage and issuer search apply to both tabs;
+each tab exports only its displayed headlines.
+
+Classification uses the constituent table's GICS Sector, refreshed with the monthly
+universe. Old saved events are classified through their CIK against the current
+snapshot. The enriched shared snapshot upgrades old local caches automatically.
+Historical issuers without sector metadata remain visible under Unclassified.
