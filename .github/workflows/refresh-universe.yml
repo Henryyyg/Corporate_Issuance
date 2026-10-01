@@ -1,0 +1,41 @@
+name: Refresh S&P 500 universe
+on:
+  schedule:
+    - cron: '0 7 1 * *'
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: monthly-universe
+  cancel-in-progress: false
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install requests pandas lxml beautifulsoup4
+      - name: Build and validate snapshot
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          from sp500 import get_universe
+          snapshot, warning = get_universe(force=True)
+          if warning:
+              raise RuntimeError(warning)
+          Path('universe_snapshot.json').write_text(json.dumps(snapshot, indent=2))
+          PY
+      - name: Commit changed universe
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add universe_snapshot.json
+          if ! git diff --cached --quiet; then
+            git commit -m 'Refresh monthly S&P 500 universe'
+            git push origin HEAD:main
+          fi
